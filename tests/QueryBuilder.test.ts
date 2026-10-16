@@ -294,10 +294,15 @@ describe('QueryBuilder - update / delete', () => {
     const httpDelete = vi.fn().mockResolvedValue({});
     const client = makeMockClient({ httpDelete });
     expect(await qb(client).deleteById('rec1')).toBe(true);
-    expect(httpDelete).toHaveBeenCalledWith(`/apps/${APP_TOKEN}/tables/${TABLE_ID}/records/rec1`);
+    // 第三个参数 true：DELETE 幂等，允许自动重试
+    expect(httpDelete).toHaveBeenCalledWith(
+      `/apps/${APP_TOKEN}/tables/${TABLE_ID}/records/rec1`,
+      undefined,
+      true,
+    );
   });
 
-  it('deleteMany batches record_ids', async () => {
+  it('deleteMany batches records (official key name)', async () => {
     const httpPost = vi.fn().mockResolvedValue({ records: [] });
     const client = makeMockClient({ httpPost });
     const ids = Array.from({ length: 1500 }, (_, i) => `rec${i}`);
@@ -305,7 +310,8 @@ describe('QueryBuilder - update / delete', () => {
     expect(httpPost).toHaveBeenCalledTimes(2);
     const [, body1] = httpPost.mock.calls[0];
     const [, body2] = httpPost.mock.calls[1];
-    expect(body1.record_ids).toHaveLength(1000);
-    expect(body2.record_ids).toHaveLength(500);
+    // 飞书 batch_delete 请求体键名是 records（发送 record_ids 会被 99992402 拒绝）
+    expect(body1.records).toHaveLength(1000);
+    expect(body2.records).toHaveLength(500);
   });
 });

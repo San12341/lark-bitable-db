@@ -28,7 +28,7 @@
 - ✅ **自动分页**：`findAll()` 内部循环 `page_token`，调用方无感
 - ✅ **批量操作**：`createMany` / `updateMany` / `deleteMany` 超过 1000 条自动分批
 - ✅ **限流保护**：读写双令牌桶，默认读 20 QPS、写 50 QPS，符合飞书官方限制
-- ✅ **自动重试**：429 限流、token 过期、网络错误自动指数退避重试
+- ✅ **自动重试**：429 限流、token 过期、网络错误自动指数退避重试（读操作与幂等写默认开启，create 等非幂等写默认不重试，避免重复写入）
 - ✅ **同表写锁**：可选的表级写串行化，避免 1254291 写冲突
 - ✅ **异常体系**：9 种结构化异常类，错误码精确映射
 - ✅ **Webhook 验签**：SHA-256 签名校验 + AES-256-CBC 解密
@@ -136,7 +136,7 @@ await users.query().deleteById(user.recordId);
 | `readQps` | `number` | `20` | 读接口 QPS 限制 |
 | `writeQps` | `number` | `50` | 写接口 QPS 限制 |
 | `timeout` | `number` | `30000` | 请求超时（毫秒） |
-| `maxRetries` | `number` | `3` | 最大重试次数 |
+| `maxRetries` | `number` | `3` | 最大重试次数（写操作默认不自动重试，见「自动重试与幂等性」） |
 | `userIdType` | `'open_id' \| 'union_id' \| 'user_id'` | `'open_id'` | user_id_type 参数 |
 | `serializeWrites` | `boolean` | `true` | 同表写操作自动串行化 |
 | `userAccessToken` | `string` | — | 外部传入的 user_access_token（提供后不再自动获取 tenant token） |
@@ -233,7 +233,8 @@ users.query().where('email', 'isEmpty');
 | `.findOne()` | `T & { recordId } \| null` | 获取第一条，无匹配返回 null |
 | `.findById(recordId)` | `T & { recordId }` | 按 recordId 查询，不存在抛 `BitableNotFoundError` |
 | `.findPage(pageSize?, pageToken?)` | `PaginatedResult<T>` | 单页查询，返回 hasMore/pageToken/total |
-| `.count()` | `number` | 匹配记录总数 |
+| `.count()` | `number` | 匹配记录总数（startsWith/endsWith 下为服务端 contains 近似值） |
+| `.countExact()` | `number` | 精确总数（客户端过滤口径，会拉取全部匹配记录，消耗更多读配额） |
 
 #### 写操作方法
 
@@ -274,6 +275,31 @@ try {
   }
 }
 ```
+
+### 自动重试与幂等性
+
+SDK 对可重试错误（网络错误、429 限流、服务端 5xx 等）做指数退避自动重试，但按幂等性区分默认策略：
+
+| 操作 | 默认自动重试 | 原因 |
+|---|---|---|
+| 读操作（findAll / findPage / findById / count 等） | ✅ | 重复读取无副作用 |
+| `updateById` / `updateMany` / `deleteById` / `deleteMany` | ✅ | 按 recordId 覆盖/删除，幂等 |
+| `create` / `createMany` | ❌ | 非幂等：若请求已达服务端但响应超时，重试会产生重复记录 |
+| token 过期（99991663） | ✅（不受上述限制） | 请求被服务端拒绝、未实际处理，重试安全 |
+
+`create` 等非幂等写遇到可重试错误时会直接抛出（错误信息中会说明未自动重试的原因）。
+若你的业务允许重复写入（例如有唯一键去重），可在底层请求中显式设置 `retryable: true`：
+
+```typescript
+// 经 HttpClient 直接发起并显式允许重试
+await client.http.post(
+  `/apps/${client.getAppToken()}/tables/${tableId}/records`,
+  { fields: { ... } },
+  true, // retryable
+);
+```
+
+---
 
 ### Webhook 验签
 

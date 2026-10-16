@@ -52,7 +52,7 @@ export interface WhereCondition {
  *   [{ fieldKey: 'status', operator: FilterOperator.Is, value: 'active' }],
  *   'and',
  * );
- * // => { conjunction: 'and', conditions: [{ fieldName: '状态', operator: 'is', value: ['active'] }] }
+ * // => { conjunction: 'and', conditions: [{ field_name: '状态', operator: 'is', value: ['active'] }] }
  * ```
  */
 export class FilterCompiler {
@@ -97,7 +97,9 @@ export class FilterCompiler {
     }
 
     return {
-      fieldName: def.fieldName,
+      // 飞书 search API 要求 snake_case 键名（field_name），
+      // 用 camelCase 会被服务端以 99992402 field validation failed 拒绝
+      field_name: def.fieldName,
       operator: cond.operator,
       value: this.convertValue(cond.operator, cond.value),
     };

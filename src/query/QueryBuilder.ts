@@ -42,6 +42,16 @@ const MAX_PAGE_SIZE = 500;
 /** findAll 默认每页条数 */
 const DEFAULT_PAGE_SIZE = 100;
 
+/**
+ * 无需 value 的操作符（调用时只传两个参数：where(field, op)）。
+ * 用于区分「无值操作符」与「简写形式 where(field, value)」——
+ * 两者参数个数相同，靠参数个数无法区分，必须按操作符白名单消歧。
+ */
+const VALUELESS_OPERATORS = new Set<string>([
+  FilterOperator.IsEmpty,
+  FilterOperator.IsNotEmpty,
+]);
+
 /** 嵌套分组（and/or 回调产生的子组） */
 interface ChildGroup {
   conjunction: 'and' | 'or';
@@ -115,14 +125,19 @@ export class QueryBuilder<T extends Record<string, unknown>> {
    *
    * 支持两种形式：
    *  - 简写：`where('name', '张三')` 等价于 `where('name', 'is', '张三')`；
-   *  - 完整：`where('price', '>', 100)`。
+   *  - 完整：`where('price', '>', 100)`；
+   *  - 无值操作符：`where('email', 'isEmpty')` / `where('email', 'isNotEmpty')`。
    *
    * 支持的操作符字符串：
    *  - `=` → is，`!=` → isNot，`>` → isGreater，`<` → isLess，
    *    `>=` → isGreaterEqual，`<=` → isLessEqual；
-   *  - `contains`，`doesNotContain`，`isEmpty`，`isNotEmpty`；
-   *  - `startsWith` / `endsWith`：飞书无原生支持，内部用 contains 发起服务端查询，
-   *    再在客户端对结果做前缀 / 后缀过滤（注意：count() 在使用这两个操作符时为近似值）。
+   *  - contains，doesNotContain，isEmpty，isNotEmpty；
+   *  - startsWith / endsWith：飞书无原生支持，内部用 contains 发起服务端查询，
+   *    再在客户端对结果做前缀 / 后缀过滤（注意：count() 在使用这两个操作符时为近似值，
+   *    精确计数请使用 countExact()）。
+   *
+   * 注意：当业务数据本身恰好是 `'isEmpty'` / `'isNotEmpty'` 字符串时，
+   * 需使用完整三参数形式 `where('field', '=', 'isEmpty')` 显式消歧。
    *
    * @param fieldKey Schema 中的用户侧属性名
    * @param operator 操作符（FilterOperator 枚举值或上述简写字符串）；
@@ -149,8 +164,14 @@ export class QueryBuilder<T extends Record<string, unknown>> {
 
     let rawOp: FilterOperator | string;
     let val: unknown;
-    if (value === undefined) {
+    if (typeof operator === 'string' && VALUELESS_OPERATORS.has(operator)) {
+      // 无值操作符：where('email', 'isEmpty') / where('email', 'isNotEmpty')
+      rawOp = operator;
+      val = undefined;
+    } else if (value === undefined) {
       // 简写：where(field, value) → where(field, 'is', value)
+      // 注意：当业务数据本身是 'isEmpty'/'isNotEmpty' 字符串时，
+      // 需用完整三参数形式 where(field, '=', 'isEmpty') 显式消歧。
       rawOp = FilterOperator.Is;
       val = operator;
     } else {
@@ -331,11 +352,18 @@ export class QueryBuilder<T extends Record<string, unknown>> {
     const results: Array<T & { recordId: string }> = [];
     let token: string | undefined = this.pageToken;
 
-    // 循环分页，直到 has_more=false
+    // 循环分页，直到 has_more=false；已累积足够条数（含客户端后置过滤命中的
+    // 条数）时提前终止，避免 limit(n) 拉取全表浪费配额与时间
     for (;;) {
       const data = await this.executeSearch(pageSize, token);
       for (const item of data.items) {
         results.push(this.deserialize(item));
+      }
+      if (this.limitCount !== undefined) {
+        const passed = this.postFilters.length > 0
+          ? this.applyPostFilters(results).length
+          : results.length;
+        if (passed >= this.limitCount) break;
       }
       if (!data.has_more || !data.page_token) break;
       token = data.page_token;
@@ -351,6 +379,11 @@ export class QueryBuilder<T extends Record<string, unknown>> {
   /**
    * 单页查询。
    *
+   * 使用 startsWith/endsWith（客户端后置过滤）时，若当前服务端页的记录
+   * 全部被过滤掉而服务端还有更多页，会继续向后翻页直到凑到至少一条匹配
+   * 记录或服务端分页耗尽，避免出现「items 为空但 hasMore=true」的语义
+   * 断裂导致调用方提前停止翻页而漏数据。
+   *
    * @param pageSize  每页条数（1-500），默认使用 limit() 或 20
    * @param pageToken 分页 token；缺省使用 offset() 设置的值
    * @returns 分页结果（items / hasMore / pageToken / total）
@@ -360,9 +393,23 @@ export class QueryBuilder<T extends Record<string, unknown>> {
     pageToken?: string,
   ): Promise<PaginatedResult<T & { recordId: string }>> {
     const size = Math.min(pageSize ?? this.limitCount ?? 20, MAX_PAGE_SIZE);
-    const token = pageToken ?? this.pageToken;
-    const data = await this.executeSearch(size, token);
-    const items = data.items.map((r) => this.deserialize(r));
+    let token: string | undefined = pageToken ?? this.pageToken;
+    let data = await this.executeSearch(size, token);
+    let items = data.items.map((r) => this.deserialize(r));
+
+    if (this.postFilters.length > 0) {
+      // 客户端后置过滤：跳过「全被过滤掉」的服务端页，直到出现匹配项
+      while (
+        this.applyPostFilters(items).length === 0 &&
+        data.has_more &&
+        data.page_token
+      ) {
+        token = data.page_token;
+        data = await this.executeSearch(size, token);
+        items = data.items.map((r) => this.deserialize(r));
+      }
+    }
+
     return {
       items: this.applyPostFilters(items),
       hasMore: data.has_more,
@@ -436,6 +483,27 @@ export class QueryBuilder<T extends Record<string, unknown>> {
     return data.total ?? 0;
   }
 
+  /**
+   * 获取匹配记录的精确总数（客户端口径）。
+   *
+   * 与 count() 的区别：count() 直接采用服务端 total，在 startsWith/endsWith
+   * （客户端后置过滤）场景下是 contains 匹配的近似值；本方法会拉取全部匹配
+   * 记录后在客户端计数，结果与 findAll().length 一致，但代价是消耗更多
+   * 读配额（受 20 QPS 限流保护）。
+   *
+   * @returns 客户端过滤后的精确匹配总数
+   */
+  async countExact(): Promise<number> {
+    const savedLimit = this.limitCount;
+    this.limitCount = undefined; // 精确计数不受 limit 截断影响
+    try {
+      const all = await this.findAll();
+      return all.length;
+    } finally {
+      this.limitCount = savedLimit;
+    }
+  }
+
   // ============================================================
   // 写入方法（执行前获取同表写锁）
   // ============================================================
@@ -502,9 +570,12 @@ export class QueryBuilder<T extends Record<string, unknown>> {
    * 端点：PUT .../records/{recordId}
    * 请求体：`{ fields: schema.serialize(data) }`
    *
+   * 注意：飞书 PUT 响应只返回本次更新的字段，因此返回值中未更新的字段为 null；
+   * 如需完整记录请在更新后调用 findById()。
+   *
    * @param recordId 目标记录 ID
    * @param data     待更新字段
-   * @returns 更新后的记录（含 recordId）
+   * @returns 更新后的记录（含 recordId；仅包含本次更新的字段）
    */
   async updateById(
     recordId: string,
@@ -515,7 +586,8 @@ export class QueryBuilder<T extends Record<string, unknown>> {
       const appToken = this.client.getAppToken();
       const path = `/apps/${appToken}/tables/${this.tableId}/records/${recordId}`;
       const body = { fields: this.schema.serialize(data as Record<string, unknown>) };
-      const resp = await this.client.http.put<GetRecordResponseData>(path, body);
+      // PUT 按 recordId 覆盖指定字段，幂等，可安全自动重试
+      const resp = await this.client.http.put<GetRecordResponseData>(path, body, true);
       return this.deserialize(resp.record);
     } finally {
       release();
@@ -548,7 +620,8 @@ export class QueryBuilder<T extends Record<string, unknown>> {
             fields: this.schema.serialize(u.data as Record<string, unknown>),
           })),
         };
-        const resp = await this.client.http.post<BatchUpdateResponseData>(path, body);
+        // batch_update 按 record_id 覆盖，幂等，可安全自动重试
+        const resp = await this.client.http.post<BatchUpdateResponseData>(path, body, true);
         for (const r of resp.records) all.push(this.deserialize(r));
       }
       return all;
@@ -570,7 +643,8 @@ export class QueryBuilder<T extends Record<string, unknown>> {
     try {
       const appToken = this.client.getAppToken();
       const path = `/apps/${appToken}/tables/${this.tableId}/records/${recordId}`;
-      await this.client.http.delete(path);
+      // DELETE 按 recordId 删除，幂等，可安全自动重试
+      await this.client.http.delete(path, undefined, true);
       return true;
     } finally {
       release();
@@ -581,7 +655,7 @@ export class QueryBuilder<T extends Record<string, unknown>> {
    * 批量删除记录。超过 1000 条自动分批。
    *
    * 端点：POST .../records/batch_delete
-   * 请求体：`{ record_ids: [...] }`
+   * 请求体：`{ records: [record_id, ...] }`（飞书要求的键名是 records）
    *
    * @param recordIds 待删除记录 ID 列表
    * @returns 删除成功返回 true
@@ -594,7 +668,9 @@ export class QueryBuilder<T extends Record<string, unknown>> {
 
       for (let i = 0; i < recordIds.length; i += BATCH_LIMIT) {
         const chunk = recordIds.slice(i, i + BATCH_LIMIT);
-        await this.client.http.post<BatchDeleteResponseData>(path, { record_ids: chunk });
+        // 飞书 batch_delete 请求体键名为 records（record_id 字符串数组），
+        // 按 record_id 删除，幂等，可安全自动重试
+        await this.client.http.post<BatchDeleteResponseData>(path, { records: chunk }, true);
       }
       return true;
     } finally {

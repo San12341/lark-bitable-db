@@ -164,10 +164,10 @@ export enum FilterOperator {
   IsLessEqual = 'isLessEqual',
 }
 
-/** 单个筛选条件 */
+/** 单个筛选条件（飞书 search API 要求 snake_case 键名） */
 export interface FilterCondition {
   /** 飞书字段名 */
-  fieldName: string;
+  field_name: string;
   /** 操作符 */
   operator: FilterOperator;
   /** 值（字符串数组，飞书 API 要求） */
@@ -380,6 +380,13 @@ export interface HttpRequestOptions {
   timeout?: number;
   /** 是否为写操作（影响限流桶选择） */
   isWrite?: boolean;
+  /**
+   * 是否允许对网络错误/限流等可重试错误自动重试。
+   * 默认：读操作为 true，写操作为 false（避免 create 等非幂等操作重复执行）。
+   * token 过期重试不受此开关限制（请求被服务端拒绝，重试安全）。
+   * 幂等写操作（update/delete）可显式设为 true。
+   */
+  retryable?: boolean;
 }
 
 /** HTTP 响应 */

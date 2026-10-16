@@ -22,7 +22,7 @@ describe('FilterCompiler', () => {
     );
     expect(group).toEqual({
       conjunction: 'and',
-      conditions: [{ fieldName: '姓名', operator: 'is', value: ['张三'] }],
+      conditions: [{ field_name: '姓名', operator: 'is', value: ['张三'] }],
     });
   });
 

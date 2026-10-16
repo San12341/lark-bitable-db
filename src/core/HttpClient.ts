@@ -67,6 +67,8 @@ interface RetryPlan {
   delay: number;
   /** 重试前是否需要先刷新 token */
   shouldRefreshToken: boolean;
+  /** 错误本可自动重试，但因非幂等写操作（retryable=false）被阻止 */
+  suppressedRetry?: boolean;
 }
 
 /**
@@ -107,6 +109,8 @@ export class HttpClient {
   ): Promise<HttpResponse<BitableApiResponse<T>>> {
     const timeout = options.timeout ?? this.timeout;
     const isWrite = options.isWrite ?? false;
+    // 默认：读操作可自动重试；写操作不可（避免 create 等非幂等操作重复执行）
+    const retryable = options.retryable ?? !isWrite;
     const limiter = isWrite ? this.rateLimiterWrite : this.rateLimiterRead;
     const method = options.method;
     const fullUrl = this.resolveUrl(options.url);
@@ -176,8 +180,13 @@ export class HttpClient {
                 { cause: err instanceof Error ? err : undefined, requestId },
               );
 
-        const plan = this.planRetry(normalized, attempt);
+        const plan = this.planRetry(normalized, attempt, retryable);
         if (!plan.retry || attempt === this.maxRetries) {
+          if (plan.suppressedRetry) {
+            normalized.message =
+              `${normalized.message}（该写操作默认不自动重试，以避免非幂等写入重复执行；` +
+              `如确认幂等可在请求选项中设置 retryable: true 后重试）`;
+          }
           throw normalized;
         }
 
@@ -218,27 +227,54 @@ export class HttpClient {
   /**
    * POST 便捷方法（写操作，isWrite=true）
    *
-   * @param path 相对路径
-   * @param body 请求体
+   * @param path      相对路径
+   * @param body      请求体
+   * @param retryable 是否允许自动重试（默认 false，避免非幂等写重复执行）
    */
-  async post<T>(path: string, body?: unknown): Promise<T> {
-    const resp = await this.request<T>({ method: 'POST', url: path, body, isWrite: true });
+  async post<T>(path: string, body?: unknown, retryable?: boolean): Promise<T> {
+    const resp = await this.request<T>({
+      method: 'POST',
+      url: path,
+      body,
+      isWrite: true,
+      retryable,
+    });
     return resp.data.data;
   }
 
   /**
    * PUT 便捷方法（写操作，isWrite=true）
+   *
+   * @param path      相对路径
+   * @param body      请求体
+   * @param retryable 是否允许自动重试（默认 false）
    */
-  async put<T>(path: string, body?: unknown): Promise<T> {
-    const resp = await this.request<T>({ method: 'PUT', url: path, body, isWrite: true });
+  async put<T>(path: string, body?: unknown, retryable?: boolean): Promise<T> {
+    const resp = await this.request<T>({
+      method: 'PUT',
+      url: path,
+      body,
+      isWrite: true,
+      retryable,
+    });
     return resp.data.data;
   }
 
   /**
    * DELETE 便捷方法（写操作，isWrite=true）
+   *
+   * @param path      相对路径
+   * @param body      请求体
+   * @param retryable 是否允许自动重试（默认 false）
    */
-  async delete<T>(path: string, body?: unknown): Promise<T> {
-    const resp = await this.request<T>({ method: 'DELETE', url: path, body, isWrite: true });
+  async delete<T>(path: string, body?: unknown, retryable?: boolean): Promise<T> {
+    const resp = await this.request<T>({
+      method: 'DELETE',
+      url: path,
+      body,
+      isWrite: true,
+      retryable,
+    });
     return resp.data.data;
   }
 
@@ -272,17 +308,29 @@ export class HttpClient {
   }
 
   /**
-   * 根据异常类型与当前重试次数，决定是否重试、等待多久、是否需刷新 token
+   * 根据异常类型与当前重试次数，决定是否重试、等待多久、是否需刷新 token。
+   *
+   * @param err        归一化后的异常
+   * @param attempt    当前重试次数
+   * @param retryable  是否允许自动重试（读默认 true，写默认 false）
    */
-  private planRetry(err: BitableBaseError, attempt: number): RetryPlan {
+  private planRetry(err: BitableBaseError, attempt: number, retryable: boolean): RetryPlan {
+    // token 过期/无效：先刷新再重试。
+    // 此类请求被服务端拒绝、未实际处理，重试不会造成重复写入，不受 retryable 限制
+    if (err.code === BitableErrorCode.TokenInvalid) {
+      return { retry: true, delay: 0, shouldRefreshToken: true };
+    }
+
+    // 非幂等写操作：不自动重试，避免「请求已达但响应超时」时重复写入
+    if (!retryable) {
+      const wouldRetry =
+        err instanceof BitableNetworkError || isRetryableCode(err.code);
+      return { retry: false, delay: 0, shouldRefreshToken: false, suppressedRetry: wouldRetry };
+    }
+
     // 网络错误（连接失败/超时/重置等）：指数退避
     if (err instanceof BitableNetworkError) {
       return { retry: true, delay: exponentialBackoff(attempt + 1), shouldRefreshToken: false };
-    }
-
-    // token 过期/无效：先刷新再重试
-    if (err.code === BitableErrorCode.TokenInvalid) {
-      return { retry: true, delay: 0, shouldRefreshToken: true };
     }
 
     // 其他可重试业务错误码

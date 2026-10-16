@@ -45,7 +45,14 @@ export function verifyWebhookSignature(
     return false;
   }
 
-  return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature));
+  // timingSafeEqual 要求两侧 Buffer 长度相同，否则抛 RangeError；
+  // 长度不等直接返回 false（签名长度是公开的固定值，长度比较不引入时序侧信道）
+  const computedBuf = Buffer.from(computed, 'utf-8');
+  const signatureBuf = Buffer.from(signature, 'utf-8');
+  if (computedBuf.length !== signatureBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(computedBuf, signatureBuf);
 }
 
 /**

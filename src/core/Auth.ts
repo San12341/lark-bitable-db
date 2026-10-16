@@ -54,6 +54,8 @@ export class Auth {
   private readonly appSecret: string;
   private readonly domain: string;
   private readonly userAccessToken?: string;
+  /** singleFlight 合并键：必须包含 appId，防止多 Client（多应用/多租户）之间 token 串号 */
+  private readonly flightKey: string;
 
   /** 缓存的 tenant_access_token */
   private cachedToken: string | null = null;
@@ -68,6 +70,7 @@ export class Auth {
     this.appSecret = options.appSecret;
     this.domain = options.domain.replace(/\/+$/, '');
     this.userAccessToken = options.userAccessToken;
+    this.flightKey = `tenant_access_token:${options.appId}`;
   }
 
   /**
@@ -99,7 +102,7 @@ export class Auth {
     if (this.userAccessToken) {
       return this.userAccessToken;
     }
-    return singleFlight<string>('tenant_access_token', async () => {
+    return singleFlight<string>(this.flightKey, async () => {
       const res = await this.fetchTokenFromServer();
       if (res.code !== 0 || !res.tenant_access_token) {
         throw new BitableAuthError(

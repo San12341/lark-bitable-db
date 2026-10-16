@@ -78,15 +78,17 @@ export class Client {
    *
    * @typeParam T 响应 data 类型
    * @param method HTTP 方法
-   * @param path    相对于 `/apps/:app_token` 的路径，如 `/tables/:table_id/records`
-   * @param body    请求体（GET 一般不传）
-   * @param isWrite 是否写操作（影响限流桶选择）；缺省时按 method 推断
+   * @param path      相对于 `/apps/:app_token` 的路径，如 `/tables/:table_id/records`
+   * @param body      请求体（GET 一般不传）
+   * @param isWrite   是否写操作（影响限流桶选择）；缺省时按 method 推断
+   * @param retryable 是否允许自动重试；缺省时读操作 true、写操作 false
    */
   async request<T>(
     method: HttpMethod,
     path: string,
     body?: unknown,
     isWrite?: boolean,
+    retryable?: boolean,
   ): Promise<T> {
     const normalized = path.startsWith('/') ? path : `/${path}`;
     const fullPath = `/apps/${this.appToken}${normalized}`;
@@ -96,6 +98,7 @@ export class Client {
       url: fullPath,
       body,
       isWrite: write,
+      retryable,
     });
     return resp.data.data;
   }

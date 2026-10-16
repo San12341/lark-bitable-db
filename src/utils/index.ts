@@ -134,28 +134,33 @@ export class TableWriteLock {
   private locks = new Map<string, Promise<void>>();
 
   /**
-   * 获取表写锁，返回释放函数
+   * 获取表写锁，返回释放函数。
+   *
+   * 实现要点：把「前驱链」和「自己的释放信号」链接为同一个 Promise 存入 map。
+   * 这样后继者 await 的正是「自己被释放」的时刻（真正互斥），且 release 时
+   * 的引用比较必然成立（可清理）；仅当队尾仍是自己时才删除，避免误删后继者。
    */
   async acquire(tableId: string): Promise<() => void> {
-    let previous = this.locks.get(tableId);
-
-    let release: () => void = () => {};
-    const current = new Promise<void>((resolve) => {
+    let release!: () => void;
+    const own = new Promise<void>((resolve) => {
       release = resolve;
     });
 
-    this.locks.set(tableId, (async () => {
-      if (previous) await previous;
-    })());
+    const previous = this.locks.get(tableId) ?? Promise.resolve();
+    const chained = previous.then(() => own);
+    this.locks.set(tableId, chained);
 
-    if (previous) {
-      await previous;
-    }
+    // 等待前驱完成；自己是第一个持锁者则立即通过
+    await previous;
 
+    let released = false;
     return () => {
+      // release 幂等：防止重复调用破坏串行性
+      if (released) return;
+      released = true;
       release();
-      // 清理已完成的锁
-      if (this.locks.get(tableId) === current) {
+      // 仅当队尾仍是自己时才清理，避免误删后继者的锁
+      if (this.locks.get(tableId) === chained) {
         this.locks.delete(tableId);
       }
     };

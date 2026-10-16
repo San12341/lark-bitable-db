@@ -51,6 +51,37 @@ yarn add lark-bitable-db
 
 ## 快速开始
 
+### 0. 准备：获取三个参数并配置权限
+
+SDK 需要三个参数，全部来自飞书开放平台：
+
+| 参数 | 哪里获取 | 格式示例 |
+|---|---|---|
+| `appId` | [飞书开发者后台](https://open.feishu.cn/app) → 创建**自建应用** → 「凭证与基础信息」页 | `cli_a94c23f7dfb85bce` |
+| `appSecret` | 同上，与 appId 同页（创建后一次性展示，可重置） | 32 位随机字符串 |
+| `appToken` | 打开目标多维表格，浏览器地址栏 `.../base/<app_token>?table=tbl...&view=vew...` 中 `/base/` 后面的一段（不含 `?` 之后内容）；知识库中的表格请先进入表格本体再复制链接 | `CXtFwNxDVi3ldVkOB1ycyu` |
+
+**自建应用需要开通的权限**（开发者后台 → 「权限管理」，SDK 按功能所需的 scope 如下）：
+
+| SDK 功能 | 调用的接口 | 所需权限（新版细粒度） | 等价旧版权限 |
+|---|---|---|---|
+| token 获取 | `POST /auth/v3/tenant_access_token/internal` | 无需任何权限 | — |
+| 查询：findAll / findPage / findOne / count | `POST .../records/search`、`GET .../records/{id}` | `base:record:retrieve` | `bitable:app:readonly` |
+| 创建：create / createMany | `POST .../records[/batch_create]` | `base:record:create` | `bitable:app` |
+| 更新：updateById / updateMany | `PUT .../records/{id}`、`POST .../records/batch_update` | `base:record:update` | `bitable:app` |
+| 删除：deleteById / deleteMany | `DELETE .../records/{id}`、`POST .../records/batch_delete` | `base:record:delete` | `bitable:app` |
+| （可选）通过 `client.request` 管理表结构 | 建表 / 删表 / 字段管理等 | `base:app:read`、`base:table:*`、`base:field:*` | `bitable:app` |
+
+> 最省事的方案：直接开通旧版总权限 `bitable:app`（覆盖全部读写），或新版四项 `base:record:create / retrieve / update / delete`。
+
+**三个高频踩坑点**（缺一个都会报 `99991672 Access denied`）：
+
+1. **授权身份必须是「应用身份」**：开通权限时确认包含 `tenant_access_token`（应用身份）。只勾选「用户身份（user_access_token）」时 SDK 无法调用——SDK 始终以应用身份请求。
+2. **权限开通后需要发布版本**：在「版本管理与发布」中创建新版本并发布（自建应用可自行审核通过），仅保存在开发配置中的权限**不会生效**。
+3. **目标多维表格要授权给应用**：打开多维表格 → 右上角「···」→「添加文档应用」，把你的应用添加为协作者（至少可编辑权限）。scope 只是「能调这类接口」，文档级授权决定「能操作哪份表格」。
+
+遇到 `99991672` 时，错误信息中会附带一键申请链接（`https://open.feishu.cn/app/<appId>/auth?q=...`），用开发者账号登录后可直接申请开通对应权限。
+
 ### 1. 初始化客户端
 
 ```typescript
